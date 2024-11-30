@@ -86,6 +86,7 @@ pub fn zernike(j: u32, n: u32, m: u32, r: f64, o: f64) -> f64 {
 pub fn mode(zj: u32, n: u32, m: u32, n_xy: usize) -> Vec<f64> {
     let d = 2f64 / (n_xy - 1) as f64;
     let h = ((n_xy - 1) / 2) as f64;
+    // println!("zj: {}, n: {}, m: {}, d: {}, h: {} ", zj, n, m, d, h);
     (0..n_xy * n_xy)
         .into_par_iter()
         .map(|k| {
@@ -94,12 +95,14 @@ pub fn mode(zj: u32, n: u32, m: u32, n_xy: usize) -> Vec<f64> {
             let x = i * d;
             let y = j * d;
             let r = x.hypot(y);
-            if r > 1f64 {
-                0f64
-            } else {
-                let o = y.atan2(x);
-                zernike(zj, n, m, r, o)
-            }
+            // if r > 1f64 {
+            //     0f64
+            // } else {
+            //     let o = y.atan2(x);
+            //     zernike(zj, n, m, r, o)
+            // }
+            let o = y.atan2(x);
+            zernike(zj, n, m, r, o)
         })
         .collect()
 }
@@ -416,4 +419,176 @@ pub fn filter(
         coefs,
         zern_o,
     )
+}
+
+/// Surface filtering
+///
+/// Remove given vector of j,n,m in a tuple as (j,n,m) of Zernike modes from `surface` defined on the given (x,y) nodes
+pub fn filter_jnm_vec(
+    surface: &[f64],
+    xy: impl Iterator<Item = (f64, f64)>,
+    jnm: Vec<(u32, u32, u32)>,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    // let mut zern = Vec::<f64>::new();
+    // let (mut r, o): (Vec<_>, Vec<_>) = xy.map(|(x, y)| (x.hypot(y), y.atan2(x))).unzip();
+    // let r_max = r.iter().cloned().reduce(|a, b| a.max(b)).unwrap();
+    // r.iter_mut().for_each(|r| {
+    //     *r /= r_max;
+    // });
+    // let start = std::time::Instant::now();
+    // for i in 0..jnm.len() {
+    //     let (j, n, m) = jnm[i];
+    //     zern.extend(
+    //         r.iter()
+    //             .zip(o.iter())
+    //             .map(|(&r, &o)| zernike(j, n, m, r, o)),
+    //     );
+    // }
+    // println!("zernike in {:?}", start.elapsed());
+
+    let (mut r, o): (Vec<_>, Vec<_>) = xy.map(|(x, y)| (x.hypot(y), y.atan2(x))).unzip();
+    let r_max = r.iter().cloned().reduce(|a, b| a.max(b)).unwrap();
+    r.iter_mut().for_each(|r| {
+        *r /= r_max;
+    });
+    let zern: Vec<f64> = jnm
+        .par_iter()
+        .flat_map(|&(j, n, m)| {
+            r.par_iter()
+                .zip(o.par_iter())
+                .map(move |(&r, &o)| zernike(j, n, m, r, o))
+        })
+        .collect();
+
+    let zern_o = gram_schmidt(&zern, jnm.len());
+    let n_nodes = r.len();
+    let coefs = zern_o
+        .chunks(n_nodes)
+        .map(|z| {
+            z.iter()
+                .zip(surface.iter())
+                .fold(0f64, |c, (z, s)| c + z * s)
+        })
+        .collect::<Vec<f64>>();
+    println!("coefs: {:?}", coefs);
+    let zern_surf =
+        zern_o
+            .chunks(n_nodes)
+            .zip(coefs.iter())
+            .fold(vec![0f64; n_nodes], |mut s, (z, c)| {
+                s.iter_mut().zip(z.iter()).for_each(|(s, z)| *s += z * c);
+                s
+            });
+
+    (
+        surface
+            .iter()
+            .zip(zern_surf.iter())
+            .map(|(s, z)| s - z)
+            .collect(),
+        coefs,
+        zern_o,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_jnm2() {
+        let (j, n, m) = super::jnm(2);
+        assert_eq!(j, vec![1, 2, 3]);
+        assert_eq!(n, vec![0, 1, 1]);
+        assert_eq!(m, vec![0, 1, 1]);
+    }
+
+    #[test]
+    fn test_jnm3() {
+        let (j, n, m) = super::jnm(3);
+        assert_eq!(j, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(n, vec![0, 1, 1, 2, 2, 2]);
+        assert_eq!(m, vec![0, 1, 1, 0, 2, 2]);
+    }
+
+    #[test]
+    fn test_jnm4() {
+        let (j, n, m) = super::jnm(4);
+        assert_eq!(j, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(n, vec![0, 1, 1, 2, 2, 2, 3, 3, 3, 3]);
+        assert_eq!(m, vec![0, 1, 1, 0, 2, 2, 1, 1, 3, 3]);
+    }
+
+    #[test]
+    fn test_jnm5() {
+        let (j, n, m) = super::jnm(5);
+        assert_eq!(j, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+        assert_eq!(n, vec![0, 1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4]);
+        assert_eq!(m, vec![0, 1, 1, 0, 2, 2, 1, 1, 3, 3, 0, 2, 2, 4, 4]);
+    }
+
+    #[test]
+    fn test_jnm6() {
+        let (j, n, m) = super::jnm(6);
+        assert_eq!(
+            j,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+        );
+        assert_eq!(
+            n,
+            vec![0, 1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5]
+        );
+        assert_eq!(
+            m,
+            vec![0, 1, 1, 0, 2, 2, 1, 1, 3, 3, 0, 2, 2, 4, 4, 1, 1, 3, 3, 5, 5]
+        );
+    }
+
+    #[test]
+    fn test_jnm7() {
+        let (j, n, m) = super::jnm(7);
+        assert_eq!(
+            j,
+            vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24, 25, 26, 27, 28
+            ]
+        );
+        assert_eq!(
+            n,
+            vec![
+                0, 1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6
+            ]
+        );
+        assert_eq!(
+            m,
+            vec![
+                0, 1, 1, 0, 2, 2, 1, 1, 3, 3, 0, 2, 2, 4, 4, 1, 1, 3, 3, 5, 5, 0, 2, 2, 4, 4, 6, 6,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_jnm8() {
+        let (j, n, m) = super::jnm(8);
+        assert_eq!(
+            j,
+            vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36
+            ]
+        );
+        assert_eq!(
+            n,
+            vec![
+                0, 1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6,
+                7, 7, 7, 7, 7, 7, 7, 7
+            ]
+        );
+        assert_eq!(
+            m,
+            vec![
+                0, 1, 1, 0, 2, 2, 1, 1, 3, 3, 0, 2, 2, 4, 4, 1, 1, 3, 3, 5, 5, 0, 2, 2, 4, 4, 6, 6,
+                1, 1, 3, 3, 5, 5, 7, 7
+            ]
+        );
+    }
 }
